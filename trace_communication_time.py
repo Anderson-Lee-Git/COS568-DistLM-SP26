@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+import json
+import re
+import sys
+from pathlib import Path
+
+TASKS = ["task_2a", "task_2b", "task_3"]
+TASK_LABELS = {
+    "task_2a": "Task 2A",
+    "task_2b": "Task 2B",
+    "task_3": "Task 3",
+}
+TRACE_FILE_RE = re.compile(r"trace_(\d+)\.json$")
+
+
+def load_trace(json_path: Path) -> dict:
+    with json_path.open("r") as f:
+        return json.load(f)
+
+
+def sum_gloo_comm_ms(trace: dict) -> float:
+    events = trace.get("traceEvents", [])
+    total_dur_us = 0.0
+
+    for ev in events:
+        if ev.get("ph") != "X":
+            continue
+        if ev.get("cat") != "user_annotation":
+            continue
+        if not str(ev.get("name", "")).startswith("gloo:"):
+            continue
+
+        dur = ev.get("dur")
+        if isinstance(dur, (int, float)):
+            total_dur_us += dur
+
+    return total_dur_us / 1e3
+
+
+def total_profiled_ms(trace: dict) -> float:
+    events = trace.get("traceEvents", [])
+    timestamps = [ev["ts"] for ev in events if isinstance(ev.get("ts"), (int, float))]
+    if not timestamps:
+        return 0.0
+
+    start_ts = min(timestamps)
+    end_ts = max(timestamps)
+    for ev in events:
+        ts = ev.get("ts")
+        dur = ev.get("dur")
+        if isinstance(ts, (int, float)) and isinstance(dur, (int, float)):
+            end_ts = max(end_ts, ts + dur)
+
+    return (end_ts - start_ts) / 1e3
+
+
+def extract_rank(trace_path: Path) -> int:
+    match = TRACE_FILE_RE.search(trace_path.name)
+    if not match:
+        raise ValueError(f"Could not extract rank from file name: {trace_path}")
+    return int(match.group(1))
+
+
+def collect_metrics(data_dir: Path) -> dict[str, dict[int, dict[str, float]]]:
+    metrics: dict[str, dict[int, dict[str, float]]] = {}
+
+    for task in TASKS:
+        task_dir = data_dir / task
+        metrics[task] = {}
+        for trace_path in sorted(task_dir.glob("trace_*.json")):
+            trace = load_trace(trace_path)
+            rank = extract_rank(trace_path)
+            communication_ms = sum_gloo_comm_ms(trace)
+            total_ms = total_profiled_ms(trace)
+            percentage = (communication_ms / total_ms * 100.0) if total_ms else 0.0
+            metrics[task][rank] = {
+                "communication": communication_ms,
+                "total": total_ms,
+                "percentage": percentage,
+            }
+
+    return metrics
+
+
+def format_metric(value: float, metric_name: str) -> str:
+    if metric_name == "percentage":
+        return f"{value:.2f}\\%"
+    return f"{value:.2f}"
+
+
+def latex_table(metrics: dict[str, dict[int, dict[str, float]]]) -> str:
+    ranks = sorted({rank for task_metrics in metrics.values() for rank in task_metrics})
+    metric_specs = [
+        ("communication", "Communication"),
+        ("total", "Total"),
+        ("percentage", "Percentage"),
+    ]
+    task_order = [task for task in TASKS if task in metrics]
+
+    lines = [
+        "\\begin{table}[h]",
+        "  \\centering",
+        "  \\caption{Per-rank communication time, total profiled time, and communication percentage across tasks. Times are reported in milliseconds.}",
+        "  \\label{tab:trace_communication}",
+        f"  \\begin{{tabular}}{{c{'c' * (len(metric_specs) * len(task_order))}}}",
+        "    \\toprule",
+        "    \\multirow{2}{*}{Rank} & "
+        + " & ".join(
+            f"\\multicolumn{{{len(task_order)}}}{{c}}{{{label}}}"
+            for _, label in metric_specs
+        )
+        + " \\\\",
+        "    \\cmidrule(lr){2-4} \\cmidrule(lr){5-7} \\cmidrule(lr){8-10}",
+        "    & "
+        + " & ".join(TASK_LABELS[task] for _metric, _label in metric_specs for task in task_order)
+        + " \\\\",
+        "    \\midrule",
+    ]
+
+    for rank in ranks:
+        cells = []
+        for metric_name, _label in metric_specs:
+            for task in task_order:
+                value = metrics.get(task, {}).get(rank, {}).get(metric_name)
+                cells.append("--" if value is None else format_metric(value, metric_name))
+        lines.append(f"    {rank} & " + " & ".join(cells) + " \\\\")
+
+    avg_cells = []
+    for metric_name, _label in metric_specs:
+        for task in task_order:
+            values = [
+                metrics.get(task, {}).get(rank, {}).get(metric_name)
+                for rank in ranks
+                if metrics.get(task, {}).get(rank, {}).get(metric_name) is not None
+            ]
+            avg_value = sum(values) / len(values) if values else None
+            avg_cells.append("--" if avg_value is None else format_metric(avg_value, metric_name))
+    lines.append("    \\midrule")
+    lines.append("    Average & " + " & ".join(avg_cells) + " \\\\")
+
+    lines.extend(
+        [
+            "    \\bottomrule",
+            "  \\end{tabular}",
+            "\\end{table}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def print_single_trace_metrics(trace_path: Path) -> None:
+    trace = load_trace(trace_path)
+    communication_ms = sum_gloo_comm_ms(trace)
+    total_ms = total_profiled_ms(trace)
+    percentage = (communication_ms / total_ms * 100.0) if total_ms else 0.0
+
+    print(f"trace = {trace_path}")
+    print(f"communication_ms = {communication_ms:.6f}")
+    print(f"total_ms = {total_ms:.6f}")
+    print(f"percentage = {percentage:.6f}%")
+
+
+if __name__ == "__main__":
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("./RTE")
+    if not target.exists():
+        print(f"Path not found: {target}")
+        sys.exit(1)
+
+    if target.is_file():
+        print_single_trace_metrics(target)
+    else:
+        metrics = collect_metrics(target)
+        print(latex_table(metrics))
