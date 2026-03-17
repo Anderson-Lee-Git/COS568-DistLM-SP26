@@ -179,55 +179,75 @@ def train(args, train_dataset, model, tokenizer):
         epoch_iterator = tqdm(
             train_dataloader, desc="Iteration", disable=args.local_rank not in [-1, 0]
         )
-        for step, batch in enumerate(epoch_iterator):
-            timer.start()
-            model.train()
-            batch = tuple(t.to(args.device) for t in batch)
-            inputs = {
-                "input_ids": batch[0],
-                "attention_mask": batch[1],
-                "token_type_ids": (
-                    batch[2] if args.model_type in ["bert", "xlnet"] else None
-                ),  # XLM don't use segment_ids
-                "labels": batch[3],
-            }
-            outputs = model(**inputs)
-            loss = outputs[
-                0
-            ]  # model outputs are always tuple in pytorch-transformers (see doc)
+        sched = schedule(skip_first=1, wait=0, warmup=1, active=3, repeat=1)
+        with profile(
+            activities=[ProfilerActivity.CPU],
+            schedule=sched,
+            on_trace_ready=lambda p: p.export_chrome_trace(
+                f"{args.output_dir}/trace_{args.local_rank}.json"
+            ),
+        ) as prof:
+            for step, batch in enumerate(epoch_iterator):
+                timer.start()
+                model.train()
+                batch = tuple(t.to(args.device) for t in batch)
+                inputs = {
+                    "input_ids": batch[0],
+                    "attention_mask": batch[1],
+                    "token_type_ids": (
+                        batch[2] if args.model_type in ["bert", "xlnet"] else None
+                    ),  # XLM don't use segment_ids
+                    "labels": batch[3],
+                }
+                outputs = model(**inputs)
+                loss = outputs[
+                    0
+                ]  # model outputs are always tuple in pytorch-transformers (see doc)
 
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
+                if args.gradient_accumulation_steps > 1:
+                    loss = loss / args.gradient_accumulation_steps
+                
+                def sync_gradients(model, args):
+                    for param in model.parameters():
+                        if param.grad is None:
+                            continue
+                        torch.distributed.all_reduce(
+                            param.grad, op=torch.distributed.ReduceOp.SUM
+                        )
+                        param.grad /= args.world_size
 
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    amp.master_params(optimizer), args.max_grad_norm
-                )
-            else:
-                ##################################################
-                # TODO(cos568): perform backward pass here (expect one line of code)
-                loss.backward()
-                ##################################################
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), args.max_grad_norm
-                )
+                if args.fp16:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                    sync_gradients(model, args)
+                    torch.nn.utils.clip_grad_norm_(
+                        amp.master_params(optimizer), args.max_grad_norm
+                    )
+                else:
+                    ##################################################
+                    # TODO(cos568): perform backward pass here (expect one line of code)
+                    loss.backward()
+                    sync_gradients(model, args)
+                    ##################################################
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), args.max_grad_norm
+                    )
 
-            loss_curve.append(loss.item())
-            tr_loss += loss.item()
-            if (step + 1) % args.gradient_accumulation_steps == 0:
-                ##################################################
-                # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
-                optimizer.step()
-                ##################################################
-                scheduler.step()  # Update learning rate schedule
-                model.zero_grad()
-                global_step += 1
-            training_time.append(timer.stop())
-            if args.max_steps > 0 and global_step > args.max_steps:
-                epoch_iterator.close()
-                break
+                loss_curve.append(loss.item())
+                tr_loss += loss.item()
+                if (step + 1) % args.gradient_accumulation_steps == 0:
+                    ##################################################
+                    # TODO(cos568): perform a single optimization step (parameter update) by invoking the optimizer (expect one line of code)
+                    optimizer.step()
+                    ##################################################
+                    scheduler.step()  # Update learning rate schedule
+                    model.zero_grad()
+                    global_step += 1
+                prof.step()
+                training_time.append(timer.stop())
+                if args.max_steps > 0 and global_step > args.max_steps:
+                    epoch_iterator.close()
+                    break
         if args.max_steps > 0 and global_step > args.max_steps:
             train_iterator.close()
             break
@@ -655,7 +675,6 @@ def main():
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
 
     model.to(args.device)
-    model = torch.nn.parallel.DistributedDataParallel(model)
 
     logger.info("Training/evaluation parameters %s", args)
 

@@ -20,7 +20,7 @@ MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
 
 # ---------- Task 2a ----------
 mkdir -p ./$TASK_NAME/task_2a
-MASTER_PORT=12346
+MASTER_PORT=12720
 srun bash -c 'uv run python3 run_glue_task_2a.py \
   --model_type bert \
   --model_name_or_path /scratch/gpfs/KOROLOVA/cl6486/.cache/huggingface/hub/models--google-bert--bert-base-cased/snapshots/cd5ef92a9fb2f889e972770a36d4ed042daf221e \
@@ -40,7 +40,6 @@ srun bash -c 'uv run python3 run_glue_task_2a.py \
 
 # ---------- Task 2b ----------
 mkdir -p ./$TASK_NAME/task_2b
-MASTER_PORT=12345
 srun bash -c 'uv run python3 run_glue_task_2b.py \
   --model_type bert \
   --model_name_or_path /scratch/gpfs/KOROLOVA/cl6486/.cache/huggingface/hub/models--google-bert--bert-base-cased/snapshots/cd5ef92a9fb2f889e972770a36d4ed042daf221e \
@@ -60,7 +59,6 @@ srun bash -c 'uv run python3 run_glue_task_2b.py \
 
 # ---------- Task 3 ----------
 mkdir -p ./$TASK_NAME/task_3
-MASTER_PORT=12347
 srun bash -c 'uv run python3 run_glue_task_3.py \
   --model_type bert \
   --model_name_or_path /scratch/gpfs/KOROLOVA/cl6486/.cache/huggingface/hub/models--google-bert--bert-base-cased/snapshots/cd5ef92a9fb2f889e972770a36d4ed042daf221e \

@@ -37,6 +37,81 @@ def sum_gloo_comm_ms(trace: dict) -> float:
     return total_dur_us / 1e3
 
 
+def merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    if not intervals:
+        return []
+
+    merged = []
+    for start, end in sorted(intervals):
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+
+    return [(start, end) for start, end in merged]
+
+
+def interval_length_ms(intervals: list[tuple[float, float]]) -> float:
+    return sum(end - start for start, end in intervals) / 1e3
+
+
+def subtract_intervals(
+    source: list[tuple[float, float]], subtract: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    if not source:
+        return []
+    if not subtract:
+        return source
+
+    result = []
+    j = 0
+    for start, end in source:
+        curr = start
+        while j < len(subtract) and subtract[j][1] <= start:
+            j += 1
+
+        k = j
+        while k < len(subtract) and subtract[k][0] < end:
+            sub_start, sub_end = subtract[k]
+            if sub_start > curr:
+                result.append((curr, min(sub_start, end)))
+            curr = max(curr, sub_end)
+            if curr >= end:
+                break
+            k += 1
+
+        if curr < end:
+            result.append((curr, end))
+
+    return result
+
+
+def non_overlapped_gloo_comm_ms(trace: dict) -> float:
+    comm_intervals = []
+    compute_intervals = []
+
+    for ev in trace.get("traceEvents", []):
+        ts = ev.get("ts")
+        dur = ev.get("dur")
+        if ev.get("ph") != "X" or not isinstance(ts, (int, float)) or not isinstance(
+            dur, (int, float)
+        ):
+            continue
+
+        start, end = ts, ts + dur
+        if ev.get("cat") == "user_annotation" and str(ev.get("name", "")).startswith(
+            "gloo:"
+        ):
+            comm_intervals.append((start, end))
+        elif ev.get("cat") == "cpu_op":
+            compute_intervals.append((start, end))
+
+    comm_union = merge_intervals(comm_intervals)
+    compute_union = merge_intervals(compute_intervals)
+    exposed_comm = subtract_intervals(comm_union, compute_union)
+    return interval_length_ms(exposed_comm)
+
+
 def total_profiled_ms(trace: dict) -> float:
     events = trace.get("traceEvents", [])
     timestamps = [ev["ts"] for ev in events if isinstance(ev.get("ts"), (int, float))]
@@ -70,7 +145,10 @@ def collect_metrics(data_dir: Path) -> dict[str, dict[int, dict[str, float]]]:
         for trace_path in sorted(task_dir.glob("trace_*.json")):
             trace = load_trace(trace_path)
             rank = extract_rank(trace_path)
-            communication_ms = sum_gloo_comm_ms(trace)
+            if task == "task_3":
+                communication_ms = non_overlapped_gloo_comm_ms(trace)
+            else:
+                communication_ms = sum_gloo_comm_ms(trace)
             total_ms = total_profiled_ms(trace)
             percentage = (communication_ms / total_ms * 100.0) if total_ms else 0.0
             metrics[task][rank] = {
@@ -85,7 +163,7 @@ def collect_metrics(data_dir: Path) -> dict[str, dict[int, dict[str, float]]]:
 def format_metric(value: float, metric_name: str) -> str:
     if metric_name == "percentage":
         return f"{value:.2f}\\%"
-    return f"{value:.2f}"
+    return f"{value / 1e3:.5f}"
 
 
 def latex_table(metrics: dict[str, dict[int, dict[str, float]]]) -> str:
@@ -100,7 +178,7 @@ def latex_table(metrics: dict[str, dict[int, dict[str, float]]]) -> str:
     lines = [
         "\\begin{table}[h]",
         "  \\centering",
-        "  \\caption{Per-rank communication time, total profiled time, and communication percentage across tasks. Times are reported in milliseconds.}",
+        "  \\caption{Per-rank communication time, total profiled time, and communication percentage across tasks. Times are reported in seconds.}",
         "  \\label{tab:trace_communication}",
         f"  \\begin{{tabular}}{{c{'c' * (len(metric_specs) * len(task_order))}}}",
         "    \\toprule",
@@ -155,8 +233,8 @@ def print_single_trace_metrics(trace_path: Path) -> None:
     percentage = (communication_ms / total_ms * 100.0) if total_ms else 0.0
 
     print(f"trace = {trace_path}")
-    print(f"communication_ms = {communication_ms:.6f}")
-    print(f"total_ms = {total_ms:.6f}")
+    print(f"communication_s = {communication_ms / 1e3:.5f}")
+    print(f"total_s = {total_ms / 1e3:.5f}")
     print(f"percentage = {percentage:.6f}%")
 
 
