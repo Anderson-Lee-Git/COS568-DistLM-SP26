@@ -50,6 +50,10 @@ from pytorch_transformers import (
 
 from pytorch_transformers import AdamW, WarmupLinearSchedule
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from utils_glue import (
     compute_metrics,
     convert_examples_to_features,

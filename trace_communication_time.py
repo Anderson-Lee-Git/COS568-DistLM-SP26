@@ -2,6 +2,7 @@
 import json
 import re
 import sys
+from bisect import bisect_right
 from pathlib import Path
 
 TASKS = ["task_2a", "task_2b", "task_3"]
@@ -11,6 +12,10 @@ TASK_LABELS = {
     "task_3": "Task 3",
 }
 TRACE_FILE_RE = re.compile(r"trace_(\d+)\.json$")
+TASK_3_ITERATION_END_NAME = (
+    "autograd::engine::evaluate_function: torch::autograd::AccumulateGrad"
+)
+TASK_3_ITERATION_START_TOKEN = "foreach_norm"
 
 
 def load_trace(json_path: Path) -> dict:
@@ -86,9 +91,9 @@ def subtract_intervals(
     return result
 
 
-def non_overlapped_gloo_comm_ms(trace: dict) -> float:
-    comm_intervals = []
-    compute_intervals = []
+def task_3_iteration_gap_comm_ms(trace: dict) -> float:
+    start_events: list[tuple[float, int | None]] = []
+    end_events_by_tid: dict[int | None, list[float]] = {}
 
     for ev in trace.get("traceEvents", []):
         ts = ev.get("ts")
@@ -98,18 +103,21 @@ def non_overlapped_gloo_comm_ms(trace: dict) -> float:
         ):
             continue
 
-        start, end = ts, ts + dur
-        if ev.get("cat") == "user_annotation" and str(ev.get("name", "")).startswith(
-            "gloo:"
-        ):
-            comm_intervals.append((start, end))
-        elif ev.get("cat") == "cpu_op":
-            compute_intervals.append((start, end))
+        name = str(ev.get("name", ""))
+        tid = ev.get("tid") if isinstance(ev.get("tid"), int) else None
+        if TASK_3_ITERATION_START_TOKEN in name:
+            start_events.append((ts, tid))
+        elif name == TASK_3_ITERATION_END_NAME:
+            end_events_by_tid.setdefault(tid, []).append(ts + dur)
 
-    comm_union = merge_intervals(comm_intervals)
-    compute_union = merge_intervals(compute_intervals)
-    exposed_comm = subtract_intervals(comm_union, compute_union)
-    return interval_length_ms(exposed_comm)
+    total_gap_us = 0.0
+    for start_ts, tid in start_events:
+        end_times = end_events_by_tid.get(tid, [])
+        prev_end_idx = bisect_right(end_times, start_ts) - 1
+        if prev_end_idx >= 0:
+            total_gap_us += max(0.0, start_ts - end_times[prev_end_idx])
+
+    return total_gap_us / 1e3
 
 
 def total_profiled_ms(trace: dict) -> float:
@@ -146,7 +154,7 @@ def collect_metrics(data_dir: Path) -> dict[str, dict[int, dict[str, float]]]:
             trace = load_trace(trace_path)
             rank = extract_rank(trace_path)
             if task == "task_3":
-                communication_ms = non_overlapped_gloo_comm_ms(trace)
+                communication_ms = task_3_iteration_gap_comm_ms(trace)
             else:
                 communication_ms = sum_gloo_comm_ms(trace)
             total_ms = total_profiled_ms(trace)
@@ -163,7 +171,7 @@ def collect_metrics(data_dir: Path) -> dict[str, dict[int, dict[str, float]]]:
 def format_metric(value: float, metric_name: str) -> str:
     if metric_name == "percentage":
         return f"{value:.2f}\\%"
-    return f"{value / 1e3:.5f}"
+    return f"{value / 1e3:.3f}"
 
 
 def latex_table(metrics: dict[str, dict[int, dict[str, float]]]) -> str:
@@ -228,7 +236,10 @@ def latex_table(metrics: dict[str, dict[int, dict[str, float]]]) -> str:
 
 def print_single_trace_metrics(trace_path: Path) -> None:
     trace = load_trace(trace_path)
-    communication_ms = sum_gloo_comm_ms(trace)
+    if trace_path.parent.name == "task_3":
+        communication_ms = task_3_iteration_gap_comm_ms(trace)
+    else:
+        communication_ms = sum_gloo_comm_ms(trace)
     total_ms = total_profiled_ms(trace)
     percentage = (communication_ms / total_ms * 100.0) if total_ms else 0.0
 

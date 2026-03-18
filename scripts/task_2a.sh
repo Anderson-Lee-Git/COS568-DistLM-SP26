@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=task_2a
 #SBATCH --time=00:59:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=4               # 4 ranks total on this node
+#SBATCH --nodes=4
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=128GB
 #SBATCH --output=./logs/task_2a.out
